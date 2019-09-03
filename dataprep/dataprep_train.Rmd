@@ -1,0 +1,503 @@
+---
+title: "RH Analytics"
+sutitle: "Preparando o Conjunto de Dados de Treinamento"
+author: "Sérgio Carvalho"
+date: "`r format(Sys.Date(), '%d %B, %Y')`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: zenburn 
+    code_folding: show
+    style_body: justify
+    df_print: paged
+    number_sections: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+editor_options: 
+    chunk_output_type: inline
+---
+
+
+```{r options-chunk, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval = TRUE, 
+                      message = FALSE,
+                      warning = FALSE, 
+                      include = TRUE,
+                      fig.path = "figures/",
+                      fig.width = 15, 
+                      fig.height = 6)
+```
+
+
+```{r pacotes-selecionados, message=FALSE, warning=FALSE, include=F}
+
+  suppressMessages(library(MASS))
+  suppressMessages(library(tidyverse))
+  suppressMessages(library(readr))
+  suppressMessages(library(dplyr))
+  suppressMessages(library(data.table))
+  suppressMessages(library(ggplot2))
+  suppressMessages(library(scales))
+  suppressMessages(library(reshape)) 
+  suppressMessages(library(caret))
+  suppressMessages(library(skimr))
+  suppressMessages(library(RANN))
+  suppressMessages(library(reticulate))
+  
+  suppressMessages(library(kernlab))
+  suppressMessages(library(mlbench))
+  suppressMessages(library(MLmetrics))
+  suppressMessages(library(RecordLinkage))
+  suppressMessages(library(Hmisc))
+
+
+```
+
+```{r echo=FALSE}
+source('../funcoes.R')
+```
+
+# Objetivos
+
+  * Realizar o pré-processamento dos dados
+  * Número de variáveis: 18 
+  * Tipo de variáveis
+      * * Inteiras ou discretas: 
+      * * Numéricas ou double
+      * * Categóricas
+      * * Qualitativas
+   * Qualidade dos dados          
+      * * Quantidade de NA's por variável
+  * Criação de novas variáveis, se precisar
+  * Transformação das variáveis, se precisar
+
+
+# Lendo os Conjuntos de Dados 
+
+```{r read-data-train}
+reticulate::source_python("../pickle_reader.py")
+df.train <- read_pickle_file("../dataset/base_treinamento_testes.pkl") %>%
+                                          data.frame(stringsAsFactors = F)
+
+df.sub <- read_pickle_file("../dataset/base_submission.pkl") %>%
+                                            data.frame(stringsAsFactors = F)
+```
+
+
+## Base de treinamento
+
+```{r}
+df.train %>% head(10)
+```
+
+
+## Base de Submissão
+
+```{r}
+df.sub %>% head(10)
+```
+
+Adicionando a variável **aprovado_vaga** na base de submissão.
+
+```{r}
+df.sub$aprovado_vaga <- NA
+df.sub %>% head(20)
+```
+
+
+## Unindo as bases 
+
+Agora vou juntar as bases de treinamento e submissão para tratar os dados de forma uniforme.
+
+```{r}
+df.all <- rbind(df.train,df.sub)
+```
+
+## Há quantos tipo de dados ?
+
+```{r metadados1}
+lapply(df.all,class) %>%
+                unlist %>% 
+          as.character %>% 
+                 table
+```
+
+Quais são essas colunas com o tipo de dados lista?
+
+## Colunas com tipo de dados __list__. 
+
+```{r}
+df.all[,lapply(df.all,class) == 'list'] %>% head() 
+```
+
+### Recuperando as informações das colunas com tipo de dados __list__.
+
+```{r}
+df.all[,lapply(df.all,class) == 'list'] <- df.all[,lapply(df.all,class) == 'list'] %>%
+                                                            lapply('as.character') %>%
+                                                                      data.frame()      
+```
+
+E agora como estão os metadados?
+
+```{r metadados2}
+lapply(df.all,class) %>%
+              unlist %>% 
+        as.character %>% 
+              table
+```
+
+## Analisando as colunas pelo tipo de dados.
+
+### Tipo de dado String
+
+```{r data-type-character}
+df.all[,lapply(df.all,class) == 'character'] %>% head()
+```
+
+Vamos transformar o tipo de dados dessas variáveis de string para categóricas. 
+
+
+```{r convert-string-to-factor}
+df.all[,lapply(df.all,class) == 'character'] = df.all[,lapply(df.all,class) == 'character'] %>% 
+                                                                            apply(2,factor) %>% 
+                                                           data.frame(stringsAsFactors = T)
+```
+
+Aproveito para converter o tipo de dado da variável aprovado_vaga, tipo inteiro, para categórico. 
+
+```{r}
+df.all$aprovado_vaga <- as.factor(df.all$aprovado_vaga)
+```
+
+E agora, quais são os tipo de dados no data-frame ?
+
+```{r}
+lapply(df.all,class) %>%
+                unlist %>% 
+          as.character %>% 
+                 table
+```
+
+overview das caracteríscas dos dados.
+
+```{r}
+str(df.all)
+```
+
+
+### Tipo de dado Categórico
+
+```{r data-type-factor}
+df.fator <- df.all[,lapply(df.all,class) == 'factor'] 
+```
+
+informações resumida dos dados.
+
+```{r summary-data-factor}
+df.fator %>% 
+      summary
+```
+
+  * Observe que nas variáveis __area_interesse_candidato__, __cargo_vaga e cidade_vaga__ há um números significativo de valores nulos, esses valores podem ser tratados por uma série de técnicas que vão desde o imput através de modelagem até a sua exclusão.  
+
+  * Outro ponto, é o fato de a variável __nível_vaga__ ter apenas 1 categoria __'JUNIOR/TRAINEE'__, logo iremos excluí-la de nossa análise, pois com apenas uma categoria ou valor qualquer variável não nos fornece informações relevantes. 
+
+  * As categorias da variável de interesse estão desbalanceadas, observe que o número de eventos para a categoria 1 é um pouco maior que 10% do número de eventos da categoria 0, isto implica que pode ser necessário algum processo de amostragem para atingir uma performance razoável como output do processo de modelagem. 
+
+
+
+### Tipo de Dado Numérico
+
+```{r data-type-numeric}
+df.num <- df.all[,lapply(df.all,class) == 'numeric'] 
+df.num %>% head()
+```
+
+### Resumo dos dados numéricos
+
+```{r summary-data-num}
+summary(df.num)
+```
+
+De forma geral os valores dessas variáveis apresentam um comportamento bem distribuído em torno de sua média/mediana e isso ajuda bastante no processo de convergência para a(s) estimativa(s) dos valore(s) dos parâmetro(s) que cada método de aprendizagem dispoe. No entanto, as variáveis __ultimo_salario_candidato__ e __mediana_teste_espanhol_candidato__ apresentam pontos que estão de certa forma distantes de suas médias/mediana podendo causar assimetria em seus comportamentos e como consequência uma certa dificuldade em se realizar predições sobre eles. 
+
+Os pontos extremos, outliers, muitas vezes são retirados dos conjuntos de dados de forma equivocada e quando isso ocorre o modelo passa a não representar a realidade do evento de interesse limitando-se a predições compreendidas dentro de um range menor de valores o que certamente prejudica a tomada de decisão.
+
+
+## A variável __codigo_vaga__
+
+Será que podemos transformar os códigos desssas vagas em categorias? Afinal, há quantos códigos de vagas? 
+
+```{r}
+table(df.num$codigo_vaga)
+```
+
+veja que interessante há 27 códigos diferentes, iremos substituí-los por letras e converter esta variável em categórica.
+
+
+```{r}
+set.seed(497)
+df.num$codigo_vaga <- as.character(df.num$codigo_vaga)
+(codigos <- data.frame(codigos = df.num$codigo_vaga %>% 
+                                              table %>% 
+                                               names,
+                       letras = as.character(c(LETTERS[1:26],
+                                               paste(LETTERS[1:2],
+                                                     collapse = ""))),
+                                stringsAsFactors = F))
+```
+
+substituindo os códigos da variável __codigo_vaga__ por letras.
+ 
+```{r substituir-codigo-vaga}
+for(i in 1:nrow(codigos)) df.num[df.num$codigo_vaga == codigos[i,1],'codigo_vaga'] <- as.character(codigos[i,2]) 
+```
+
+
+```{r}
+df.num %>% head
+```
+
+
+## Dados Categóricos + Numéricos 
+
+```{r joint-all}
+df.all = bind_cols(df.fator,df.num) %>% 
+         select(aprovado_vaga,codigo_vaga, everything()) %>%
+            data.frame(stringsAsFactors = T)
+```
+
+```{r fig.width=18, fig.height=6}
+xtabs( ~ aprovado_vaga + codigo_vaga, 
+           data = df.all[!is.na(df.all$aprovado_vaga),]) %>% 
+           prop.table(2) %>% 
+           barplot(legend = T, horiz = F, las = 1, main = '\n Tabela das Proporções Condicionais das Variáveis codigo_vaga vs aprovado_vaga \n')
+```
+
+Observe no gráfico acima que dependendo do código da vaga em que o candidado se inscrever ele terá maior ou menor chance de ser aprovado, esta variável poderá nos ajudar a discriminar a variável resposta __aprovado_vaga__.   
+
+
+```{r codigo-vaga-como-catagorica}
+df.all$codigo_vaga <- as.factor(df.all$codigo_vaga)
+```
+
+## Resumo dos dados 
+
+```{r resumo-dos-dados}
+skim_to_wide(df.all)
+```
+
+Como os valores nulos foram transformados em categóricos a coluna missing nos diz que não há dados nulos em nosso dataframe.
+
+Qual a importância de cada variável em relação a variável resposta?
+ 
+## Importância das Variáveis 
+
+
+```{r fig.width=18,fig.height=8}
+importance.vars(df.all,'aprovado_vaga')
+```
+
+Aqui temos uma idéia prévia das variáveis que poderão fazer parte do modelo, veja que as variáveis __ultimo_cargo_candidato__, __mediana_teste_ingles_candidato__, __cidade_candidato__ podem contribuir significativamente para nos ajudar a explicar o comportamento da variável resposta.  
+
+
+## Número de Categoria das Variáveis
+
+
+```{r fig.width=18, fig.height=6}
+apply(df.all,2,function(x) length(table(x))) %>% sort(decreasing = T) 
+```
+
+Note que as variáveis __ultimo_cargo_candidato__, __cidade_candidato__, __area_interesse_candidato__ possuem muitas categorias e isto pode ser um problema quando formos realizar a modelagem, vamos analisá-las. 
+
+## Variável __ultimo_cargo_candidato__
+
+Quais são as categorias da variável __ultimo_cargo_candidato__?
+
+```{r categorias-ultimocargocandidato}
+df.all$ultimo_cargo_candidato %>% 
+                        table %>% 
+         sort(decreasing = T) %>%
+                     head(50)
+```
+
+Com uma rápida olhada nestas categorias é possível observar que as palavras __ESTAGIO__, __ENGENHEIRO__, __ANALISTA__, __TRAINEE__ entre outras são bastante frequentes, precisamos trata-las afim de reduzir o número de categorias desta variável.       
+Agora vamos fazer um split em cada string da variável __ultimo_cargo_candidato__ e por fim contar verficar as categorias mais frequentes.    
+
+```{r more-frequence1}
+df.all$ultimo_cargo_candidato %>% 
+                 str_split(" ") %>% 
+                         unlist %>%
+                        table() %>% 
+           sort(decreasing = T) %>% 
+                       head(50)
+```
+
+criando uma variável. 
+
+```{r}
+df.all$emprego <- NA 
+df.all$emprego <- as.character(df.all$emprego)
+```
+
+
+```{r read-datawords-salario, message=FALSE, warning=FALSE}
+(df.cargo <- readxl::read_excel('../dataset/ultimo_cargo.xlsx',sheet = 'Plan1'))  
+```
+
+imputando as novas categorias referente ao último cargo do candidato.
+
+```{r imput-new-categ1}
+for(i in 1:nrow(df.cargo)){ 
+
+  df.all[str_detect(as.character(df.all[,3]),as.character(df.cargo[i,1])),'emprego'] <- as.character(df.cargo[i,2])
+}
+```
+
+```{r}
+df.all %>% 
+  select(ultimo_cargo_candidato,emprego)
+```
+
+E agora ficamos com quantas categorias?
+
+```{r}
+df.all$emprego %>% 
+  table %>% 
+  sort(decreasing = T)
+```
+
+agora temos apenas 25 categorias, ocorre porém que este processo de redução das categorias implica em termos uma menor variabilidade da variável de interesse em relação a essas novas categoricas, o que de certa forma acaba prejudicando o desempenho dos modelos, o ideal é encontrar o número mínimo de categorias que maximizam a variabilidade da variável resposta.  
+
+```{r}
+sum(df.all$emprego %>% is.na())/nrow(df.all)
+```
+
+a categoria **OUTROS** irá representar as categorias menos frequentes.
+
+```{r}
+df.all$emprego[is.na(df.all$emprego)] <- 'OUTROS'
+```
+
+atribuindo as novas categorias a variável **ultimo_cargo_candidato**.
+
+```{r}
+df.all$ultimo_cargo_candidato <- df.all$emprego
+```
+
+deletando a variável emprego.
+
+```{r}
+df.all$emprego <- NULL
+```
+
+vejamos como ficou nosso dataframe.
+
+```{r}
+df.all %>% head()
+```
+
+## Variável __area_interesse_candidato__
+
+
+Com uma rápida olhada nestas categorias é possível observar que as palavras __ENGENHARIA__, __ADMINISTRACAO__, __PRODUCAO__, __COMERCIAL/VENDAS__ entre outras são bastante frequentes, precisamos tratá-las afim de reduzir o número de categorias destas variáveis.     
+
+Agora vamos fazer um split em cada string da variável __area_interesse_candidato__ e por fim contar verficar as categorias mais frequentes.    
+
+```{r more-frequence}
+area <- df.all$area_interesse_candidato %>% 
+                         str_split(" ") %>% 
+                                 unlist %>%
+                                table() %>% 
+                   sort(decreasing = T) %>% 
+                                names()
+```
+
+a função relationship recebe uma palavra e uma vetor de strings e nos retorna o contexto da palavra para melhor categoriza-la. 
+
+```{r re-categorizando-area-interesse}
+y <- as.character(df.all$area_interesse_candidato)
+relationship(area[1],y)
+```
+
+
+```{r read-datawords, message=FALSE, warning=FALSE}
+df.area <- readxl::read_excel('../dataset/area_interesse.xlsx',sheet = 'Plan1')  
+```
+
+criando uma variável denomida de __area__.
+
+```{r}
+df.all$area <- NA 
+```
+
+imputando as novas categorias referente a área de interesse do candidato.
+
+```{r imput-new-categ}
+for(i in 1:nrow(df.area)){ 
+  
+  df.all[str_detect(as.character(df.all[,4]),as.character(df.area[i,1])),'area'] <- as.character(df.area[i,2])
+}
+```
+
+
+```{r}
+df.all %>% 
+  select(cidade_candidato,area)
+```
+
+porcentagem de valores nulos **NA** em **area**.
+
+```{r}
+sum(df.all$area %>% is.na())/nrow(df.all)
+```
+
+as categorias de menor frequência serão representadas pela categoria  **OUTRAS**.
+
+```{r}
+df.all$area[is.na(df.all$area)] <- 'OUTROS'
+```
+
+atribuindo as novas categorias a variável **area_interesse_candidato**.
+
+```{r}
+df.all$area_interesse_candidato <- df.all$area
+```
+
+deletando a variável area
+
+```{r}
+df.all$area <- NULL
+```
+
+Selecinando algumas variáveis.
+
+```{r}
+df.all <- df.all %>% 
+           select(-nivel_vaga, 
+                  -formacao_vaga,
+                  -cidade_candidato)
+```
+
+dados de treinamento e submissão.
+
+```{r}
+df.train <- df.all[!is.na(df.all$aprovado_vaga),]
+df.sub <- df.all[is.na(df.all$aprovado_vaga),]
+```
+
+
+# Exportando os dados 
+
+```{r output-data-objects}
+write.csv(df.train,'../outputs/df.train.csv')
+write.csv(df.sub,'../outputs/df.sub.csv')
+```
+
+

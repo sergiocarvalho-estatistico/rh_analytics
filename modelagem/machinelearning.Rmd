@@ -1,0 +1,474 @@
+---
+title: "RH Analytics - Machine Learning"
+author: "Sérgio Carvalho"
+date: "`r format(Sys.Date(), '%d %B, %Y')`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    highlight: zenburn 
+    code_folding: show
+    style_body: justify
+    df_print: paged
+    number_sections: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+editor_options: 
+    chunk_output_type: inline
+---
+
+
+```{r options-chunk, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval = TRUE, 
+                      message = FALSE,
+                      warning = FALSE, 
+                      include = TRUE,
+                      fig.path = "figures/")
+```
+
+```{r pacotes-selecionados, message=FALSE, warning=FALSE, include=F}
+
+  suppressMessages(library(MASS))
+  suppressMessages(library(tidyverse))
+  suppressMessages(library(data.table))
+  suppressMessages(library(caret))
+  suppressMessages(library(ggplot2))
+  suppressMessages(library(kernlab))
+  suppressMessages(library(mlbench))
+  suppressMessages(library(MLmetrics))
+  suppressMessages(library(mlr))
+  suppressMessages(library(ROSE))
+  suppressMessages(library(e1071))
+  
+  suppressMessages(library(dplyr)) 
+  suppressMessages(library(DMwR))  
+  suppressMessages(library(purrr)) 
+  suppressMessages(library(pROC))  
+  
+  suppressMessages(library(parallel))
+  suppressMessages(library(doParallel))
+
+```
+
+  
+
+```{r echo=FALSE}
+source('../funcoes.R')
+```
+
+# Objetivos
+
+  * Construir Modelos Preditivos.  
+  * Métricas de Performance
+    * Sensitivity
+    * Specificity
+    * Precision
+    * Recall
+    * F1 
+
+# Conjunto de dados
+
+```{r read-modeltrain, message=FALSE, warning=FALSE}
+df.train <- fread('../outputs/df.train.csv', 
+                     sep=",", 
+                     showProgress = FALSE)[,-1] %>%
+                     data.frame(stringsAsFactors = T)  
+
+df.sub <- fread('../outputs/df.sub.csv', 
+                      sep=",", 
+                      showProgress = FALSE)[,-1] %>%
+                      data.frame(stringsAsFactors = T) %>% select(-aprovado_vaga)
+```
+
+```{r}
+df.train[,lapply(df.train,'class')=='character'] = df.train[,lapply(df.train,'class')=='character'] %>% 
+                                                                                     lapply(factor) %>% 
+                                                                       data.frame(stringsAsFactors = T)
+
+df.sub[,lapply(df.sub,'class')=='character'] = df.sub[,lapply(df.sub,'class')=='character'] %>% 
+                                                                             lapply(factor) %>% 
+                                                                       data.frame(stringsAsFactors = T)
+
+```
+
+```{r}
+lapply(df.train,class) %>% 
+                unlist %>% 
+                 table
+```
+
+
+## Tratando os Níveis das Categorias 
+
+Aqui quero garantir que os níveis das variáveis categóricas em **df.train** estejam também em **df.sub**.
+
+```{r}
+levels(df.train$cargo_vaga) <- c(levels(df.train$cargo_vaga),
+                                 levels(df.sub$cargo_vaga))
+levels(df.sub$cargo_vaga)   <- levels(df.train$cargo_vaga)
+
+levels(df.train$area_interesse_candidato) <- c(levels(df.train$area_interesse_candidato),
+                                               levels(df.sub$area_interesse_candidato))
+levels(df.sub$area_interesse_candidato)   <- levels(df.train$area_interesse_candidato)
+
+levels(df.train$ultimo_cargo_candidato) <- c(levels(df.train$ultimo_cargo_candidato),
+                                             levels(df.sub$ultimo_cargo_candidato))
+levels(df.sub$ultimo_cargo_candidato)   <- levels(df.train$ultimo_cargo_candidato)
+
+levels(df.train$codigo_vaga) <- c(levels(df.train$codigo_vaga),
+                                  levels(df.sub$codigo_vaga))
+levels(df.sub$codigo_vaga)   <- levels(df.train$codigo_vaga)
+
+levels(df.train$nivel_candidato) <- c(levels(df.train$nivel_candidato),
+                                      levels(df.sub$nivel_candidato))
+levels(df.sub$nivel_candidato)   <- levels(df.train$nivel_candidato)
+
+levels(df.train$formacao_candidato) <- c(levels(df.train$formacao_candidato),
+                                         levels(df.sub$formacao_candidato))
+levels(df.sub$formacao_candidato)   <- levels(df.train$formacao_candidato)
+
+levels(df.train$formacao_vaga) <- c(levels(df.train$formacao_vaga),
+                                    levels(df.sub$formacao_vaga))
+levels(df.sub$formacao_vaga)   <- levels(df.train$formacao_vaga)
+
+levels(df.train$cidade_vaga) <- c(levels(df.train$cidade_vaga),
+                                  levels(df.sub$cidade_vaga))
+levels(df.sub$cidade_vaga)   <- levels(df.train$cidade_vaga)
+```
+
+## Importância das Variáveis Categóricas
+
+É interessante notar que após o pré-processamento de dados que realizamos em **dataprep.Rmd** houve uma mudança nos percentuais de importância das covariáveis em relação a variável **target**. Observe que agora a variável de maior importância é a **mediana_teste_ingles_candidato**.
+
+```{r fig.width=18,fig.height=6.5}
+importance.vars(df.train,'aprovado_vaga')
+```
+
+
+# Modelando Dados Desbalanceados Originais
+
+```{r}
+df.train <- df.train %>% 
+            mutate(aprovado_vaga = ifelse(aprovado_vaga == 0,
+                                                 'reprovado',
+                                                 'aprovado'))
+
+df.train$aprovado_vaga <- as.factor(df.train$aprovado_vaga)
+
+df.train %>% head()
+```
+
+
+## Split no conjunto de dados
+
+```{r}
+set.seed(42)
+index <- createDataPartition(df.train$aprovado_vaga, p = 0.7, list = FALSE)
+train_data <- df.train[index, ]
+test_data  <- df.train[-index,]
+```
+
+proporções da variável resposta.
+
+
+```{r}
+prop.table(table(train_data$aprovado_vaga))
+```
+
+# Aprendizado de Máquina __Gradient Boosting Machine__ __(gbm)__
+
+Para modelar esses dados, será utilizado o algoritmo __Gradient Boosting Machine__ __(gbm)__, pois ele pode lidar facilmente com possíveis interações e não linearidades. Os hiperparâmetros do modelo são ajustados usando a validação cruzada repetida no conjunto de treinamento, repetindo cinco vezes com dez dobras usadas em cada repetição. A AUC é usada para avaliar o classificador para evitar a necessidade de tomar decisões sobre o limite de classificação. 
+
+
+## Configurando os hiperparâmetros
+
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 5,
+                     preProcOptions = c("center","scale"),
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     allowParallel = T)
+```
+
+
+## Primeiro Modelo
+
+Aqui estou construindo um modelo com dados brutos, sem qualquer processo de amostragem.
+
+
+```{r}
+set.seed(5627)
+
+cl = start.cluster()
+
+gbm.orig <- caret::train(aprovado_vaga ~ .,
+                         data = train_data,
+                         method = "gbm",
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl = ctrl)
+
+stop.Cluster(cl)
+
+saveRDS(gbm.orig,'../outputs/gbm.orig.rds')
+```
+
+
+## Ponderando a Variável Resposta   
+
+Atribuindo pesos as proporções da variável resposta. 
+
+```{r}
+model_weights <- ifelse(train_data$aprovado_vaga == "aprovado",
+                        (1/table(train_data$aprovado_vaga)[1]) * 0.5,
+                        (1/table(train_data$aprovado_vaga)[2]) * 0.5)
+```
+
+usando a mesma semente em todos os modelos para garantir as mesmas divisões de validação cruzada.
+
+```{r}
+ctrl$seeds <- gbm.orig$control$seeds
+```
+
+## Modelo Ponderado
+
+```{r}
+cl = start.cluster()
+
+gbm.weighted <- caret::train(aprovado_vaga ~ .,
+                             data = train_data,
+                             method = "gbm",
+                             verbose = FALSE,
+                             weights = model_weights,
+                             metric = "ROC",
+                             trControl = ctrl)
+
+stop.Cluster(cl)
+saveRDS(gbm.orig,'../outputs/gbm.weighted.rds')
+```
+
+
+## Modelo down-sampled 
+
+```{r}
+ctrl$sampling <- "down"
+```
+
+```{r}
+cl = start.cluster()
+
+gbm.down <- caret::train(aprovado_vaga ~ .,
+                         data = train_data,
+                         method = "gbm",
+                         verbose = FALSE,
+                         metric = "ROC",
+                         trControl = ctrl)
+
+saveRDS(gbm.orig,'../outputs/gbm.down.rds')
+stop.Cluster(cl)
+
+```
+
+## Modelo up-sampled 
+
+```{r}
+ctrl$sampling <- "up"
+```
+
+```{r}
+cl = start.cluster()
+
+gbm.up <- caret::train(aprovado_vaga ~ .,
+                       data = train_data,
+                       method = "gbm",
+                       verbose = FALSE,
+                       metric = "ROC",
+                       trControl = ctrl)
+
+saveRDS(gbm.orig,'../outputs/gbm.up.rds')
+stop.Cluster(cl)
+```
+
+
+## Modelo Smote 
+
+```{r}
+ctrl$sampling <- "smote"
+```
+
+```{r}
+cl = start.cluster()
+
+gbm.smote <- caret::train(aprovado_vaga ~ .,
+                           data = train_data,
+                           method = "gbm",
+                           verbose = FALSE,
+                           metric = "ROC",
+                           trControl = ctrl)
+
+saveRDS(gbm.orig,'../outputs/gbm.smote.rds')
+stop.Cluster(cl)
+```
+
+
+# Resultados para o conjunto de testes
+
+
+```{r}
+model_list <- list(gbm.original = gbm.orig,
+                   gbm.weighted = gbm.weighted,
+                   gbm.down = gbm.down,
+                   gbm.up = gbm.up,
+                   gbm.smote = gbm.smote)
+
+model_list_roc <- model_list %>%
+                    map(test_roc, data = test_data)
+
+model_list_roc %>% map(auc)
+```
+
+Veja que a AUC calculada no conjunto de testes mostra uma clara distinção entre a implementação do modelo original e as que incorporaram uma técnica de ponderação ou amostragem, o modelo up-sampled  possuía o maior valor de AUC.
+
+
+# Obtendo as Predições
+
+
+```{r}
+pred.gbm.orig <- predict(gbm.orig, newdata = test_data)
+pred.gbm.weighted <- predict(gbm.weighted, newdata = test_data)
+pred.gbm.down <- predict(gbm.down, newdata = test_data)
+pred.gbm.up <- predict(gbm.up, newdata = test_data)
+pred.gbm.smote <- predict(gbm.smote, newdata = test_data)
+```
+
+# Obtendo a Matrix de Confusão
+
+```{r}
+cm_gbm.original <- confusionMatrix(pred.gbm.orig, test_data$aprovado_vaga)
+cm_gbm.weighted <- confusionMatrix(pred.gbm.weighted, test_data$aprovado_vaga)
+cm_gbm.down     <- confusionMatrix(pred.gbm.down, test_data$aprovado_vaga)
+cm_gbm.up       <- confusionMatrix(pred.gbm.up, test_data$aprovado_vaga)
+cm_gbm.smote    <- confusionMatrix(pred.gbm.smote, test_data$aprovado_vaga)
+```
+
+# Plotando a curva ROC do modelos 
+
+
+
+```{r}
+results_list_roc <- list(NA)
+num_mod <- 1
+
+for(the_roc in model_list_roc){
+  
+  results_list_roc[[num_mod]] <- 
+    data_frame(tpr = the_roc$sensitivities,
+               fpr = 1 - the_roc$specificities,
+               model = names(model_list)[num_mod])
+  
+  num_mod <- num_mod + 1
+  
+}
+```
+
+```{r}
+results_df_roc <- bind_rows(results_list_roc)
+```
+
+
+
+```{r fig.width=18, fig.height=6}
+custom_col <- c("#000000", "#009E73", "#0072B2", "#D55E00", "#CC79A7","#CC29E67")
+
+ggplot(aes(x = fpr,  y = tpr, group = model), data = results_df_roc) +
+  geom_line(aes(color = model), size = 1) +
+  scale_color_manual(values = custom_col) +
+  geom_abline(intercept = 0, slope = 1, color = "gray", size = 1) +
+  theme_bw(base_size = 18)
+```
+
+
+# Comparando os Resultados
+
+Agora vamos comparar as previsões de todos esses modelos:
+
+
+```{r}
+models <- list(gbm.original = gbm.orig,
+               gbm.weighted = gbm.weighted,
+               gbm.down = gbm.down,
+               gbm.up = gbm.up,
+               gbm.smote = gbm.smote)
+```
+
+# Plotando Métricas Importantes
+
+```{r fig.width=18,fig.height=6}
+resampling <- resamples(models)
+bwplot(resampling)
+```
+
+
+```{r}
+comparison <- data.frame(model = names(models),
+                         Sensitivity = rep(NA, length(models)),
+                         Specificity = rep(NA, length(models)),
+                         Precision = rep(NA, length(models)),
+                         Recall = rep(NA, length(models)),
+                         F1 = rep(NA, length(models)))
+```
+
+
+
+```{r}
+for(name in names(models)){
+  
+  model <- get(paste0("cm_", name))
+
+  comparison[comparison$model == name,'Sensitivity'] <- model[[4]]['Sensitivity']
+  comparison[comparison$model == name,'Specificity'] <- model[[4]]["Specificity"]
+  comparison[comparison$model == name,'Precision'] <- model[[4]]["Precision"]
+  comparison[comparison$model == name,'Recall'] <- model[[4]]["Recall"]
+  comparison[comparison$model == name,'F1'] <- model[[4]]["F1"]      
+}
+
+comparison 
+```
+
+o modelo resultado para métrica **F1-Score** foi obtido pelo modelo **gbm.up**.
+
+
+> Foi observado no modelo **gbm.weighted** que ao se alterar as proporções dos pesos de (0.5,0.5) para (0.45,0.55) e (0.35,0.65) dos níveis **aprovado (1)**  e **reprovado (0)**, a métrica **F1-Score** teve seu valor aumentado saindo de aproximadamente 0.31 para 0.34, porém o **Recall** perdia valor, ou seja, o erro para a classe positiva **aprovado** aumentava, deste modo optei por hora pelas proporções **(0.5,0.5)**.     
+
+# Predição Modelo up-sampled com a Base de Submissão
+
+
+```{r}
+pred.gbm.up_df.sub <- predict(gbm.up, newdata = df.sub)
+
+pred.gbm.up_df.sub = as.character(pred.gbm.up_df.sub)
+
+pred.gbm.up_df.sub[pred.gbm.up_df.sub == 'aprovado'] <- 1
+pred.gbm.up_df.sub[pred.gbm.up_df.sub == 'reprovado'] <- 0
+
+resultado <- data.frame(aprovado_vaga =  pred.gbm.up_df.sub, stringsAsFactors = T)
+```
+
+
+```{r}
+resultado %>% head()
+```
+
+
+# Exportando Resultados
+
+```{r}
+reticulate::py_save_object(resultado,"../outputs/resultado.pkl", pickle = "pickle")
+```
+
+
+
